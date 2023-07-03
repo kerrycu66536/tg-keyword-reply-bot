@@ -34,14 +34,29 @@ func main() {
 	start(token)
 }
 
-package main
+func start(botToken string) {
+	var err error
+	bot, err = api.NewBotAPI(botToken)
+	if err != nil {
+		log.Panic(err)
+	}
+	bot.Debug = debug
+	log.Printf("Authorized on account: %s  ID: %d", bot.Self.UserName, bot.Self.ID)
 
-import (
-	"log"
-	"strconv"
+	u := api.NewUpdate(0)
+	u.Timeout = 60
 
-	api "github.com/go-telegram-bot-api/telegram-bot-api"
-)
+	updates, err := bot.GetUpdatesChan(u)
+	if err != nil {
+		panic("Can't get Updates")
+	}
+	for update := range updates {
+		if update.Message == nil { // ignore any non-Message updates
+			continue
+		}
+		go processUpdate(&update)
+	}
+}
 
 func start(botToken string) {
 	var err error
@@ -73,58 +88,47 @@ func start(botToken string) {
 	}
 }
 
-// 发送消息
-func sendMessage(msg *api.MessageConfig) {
-	_, err := bot.Send(msg)
-	if err != nil {
-		log.Println("Failed to send message:", err)
-	}
-}
-
-func main() {
-	// 在这里添加你的机器人初始化代码
-
-	for update := range updates {
-		if update.Message != nil {
-			go processUpdate(&update)
-		}
-	}
-
-	// ...
-}
-
-
+/**
+ * 对于每一个update的单独处理
+ */
 func processUpdate(update *api.Update) {
-    // ...
-    if update.Message != nil { 
-        if update.Message.IsCommand() {
-            processCommand(update)
-            continue
-        }
-        // ...
-    }
-    // ...
+	upmsg := update.Message
+	gid := upmsg.Chat.ID
+	uid := upmsg.From.ID
+	//检查是不是新加的群或者新开的人
+	in := checkInGroup(gid)
+	if !in { //不在就需要加入, 内存中加一份, 数据库中添加一条空规则记录
+		common.AddNewGroup(gid)
+		db.AddNewGroup(gid)
+	}
+	if upmsg.IsCommand() {
+		go processCommond(update)
+	} else {
+		go processReplyCommond(update)
+		go processReply(update)
+	}
 }
 
-func processCommand(update *api.Update) {
-    if update.Message != nil && update.Message.IsCommand() {
-        command := update.Message.Command()
-        switch command {
-        case "start":
-            // 处理 /start 命令
-            // ...
-        case "help":
-            // 处理 /help 命令
-            // ...
-        case "setcommands":
-            if checkAdmin(update.Message.From) {
-                setBotCommands()
-            }
-        default:
-            // 处理其他命令
-            // ...
-        }
-    }
+func processReply(update *api.Update) {
+	var msg api.MessageConfig
+	upmsg := update.Message
+	gid := upmsg.Chat.ID
+	uid := upmsg.From.ID
+	replyText := findKey(gid, upmsg.Text)
+	if replyText == "delete" {
+		_, _ = bot.DeleteMessage(api.NewDeleteMessage(gid, upmsg.MessageID))
+	} else if strings.HasPrefix(replyText, "ban") {
+		_, _ = bot.DeleteMessage(api.NewDeleteMessage(gid, upmsg.MessageID))
+		banMember(gid, uid, -1)
+	} else if strings.HasPrefix(replyText, "kick") {
+		_, _ = bot.DeleteMessage(api.NewDeleteMessage(gid, upmsg.MessageID))
+		kickMember(gid, uid)
+	} else if replyText != "" {
+		msg = api.NewMessage(gid, replyText)
+		msg.DisableWebPagePreview = true
+		msg.ReplyToMessageID = upmsg.MessageID
+		sendMessage(msg)
+	}
 }
 
 func processCommond(update *api.Update) {
@@ -182,16 +186,50 @@ func processCommond(update *api.Update) {
 		msg.ParseMode = "Markdown"
 		sendMessage(msg)
 		banMember(gid, uid, 30)
-	case "me":
-		myuser := upmsg.From
-		msg.Text = "[" + upmsg.From.String() + "](tg://user?id=" + strconv.Itoa(upmsg.From.ID) + ") 的账号信息" +
-			"\r\nID: " + strconv.Itoa(uid) +
-			"\r\nUseName: [" + upmsg.From.String() + "](tg://user?id=" + strconv.Itoa(upmsg.From.ID) + ")" +
-			"\r\nLastName: " + myuser.LastName +
-			"\r\nFirstName: " + myuser.FirstName +
-			"\r\nIsBot: " + strconv.FormatBool(myuser.IsBot)
-		msg.ParseMode = "Markdown"
-		sendMessage(msg)
 	default:
+	}
+}
+
+func processReplyCommond(update *api.Update) {
+	var msg api.MessageConfig
+	upmsg := update.Message
+	gid := upmsg.Chat.ID
+	//回复类型的管理命令
+	if upmsg.ReplyToMessage != nil {
+		reolyToUserId := upmsg.ReplyToMessage.From.ID
+		switch upmsg.Text {
+		case "ban":
+			if checkAdmin(gid, *upmsg.From) {
+				banMember(gid, reolyToUserId, -1)
+				mem, _ := bot.GetChatMember(api.ChatConfigWithUser{ChatID: gid, SuperGroupUsername: "", UserID: reolyToUserId})
+				if !mem.CanSendMessages {
+					msg = api.NewMessage(gid, "")
+					msg.Text = "[" + upmsg.From.String() + "](tg://user?id=" + strconv.Itoa(upmsg.From.ID) + ") 禁言了 " +
+						"[" + upmsg.ReplyToMessage.From.String() + "](tg://user?id=" + strconv.Itoa(reolyToUserId) + ") "
+					msg.ParseMode = "Markdown"
+					sendMessage(msg)
+				}
+			}
+		case "unban":
+			if checkAdmin(gid, *upmsg.From) {
+				unbanMember(gid, reolyToUserId)
+				//mem,_ := bot.GetChatMember(api.ChatConfigWithUser{gid, "", reolyToUserId})
+				//
+				msg = api.NewMessage(gid, "")
+				msg.Text = "[" + upmsg.From.String() + "](tg://user?id=" + strconv.Itoa(upmsg.From.ID) + ") 解禁了 " +
+					"[" + upmsg.ReplyToMessage.From.String() + "](tg://user?id=" + strconv.Itoa(reolyToUserId) + ") "
+				msg.ParseMode = "Markdown"
+				sendMessage(msg)
+			}
+		case "kick":
+			if checkAdmin(gid, *upmsg.From) {
+				kickMember(gid, reolyToUserId)
+			}
+		case "unkick":
+			if checkAdmin(gid, *upmsg.From) {
+				unkickMember(gid, reolyToUserId)
+			}
+		default:
+		}
 	}
 }
