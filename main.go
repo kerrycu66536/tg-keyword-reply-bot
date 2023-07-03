@@ -58,36 +58,6 @@ func start(botToken string) {
 	}
 }
 
-func start(botToken string) {
-	var err error
-	bot, err = api.NewBotAPI(botToken)
-	if err != nil {
-		log.Panic(err)
-	}
-	bot.Debug = debug
-	log.Printf("Authorized on account: %s  ID: %d", bot.Self.UserName, bot.Self.ID)
-
-	u := api.NewUpdate(0)
-	u.Timeout = 60
-
-	updates, err := bot.GetUpdatesChan(u)
-	if err != nil {
-		panic("Can't get Updates")
-	}
-	for update := range updates {
-		if update.Message == nil { // ignore any non-Message updates
-			continue
-		}
-
-		// 检查消息的群组ID是否为特定群组的ID
-		if update.Message.Chat.ID == -SpecialGroupID {
-			go processUpdate(&update)
-		} else {
-			go processUpdateAll(&update)
-		}
-	}
-}
-
 /**
  * 对于每一个update的单独处理
  */
@@ -106,6 +76,21 @@ func processUpdate(update *api.Update) {
 	} else {
 		go processReplyCommond(update)
 		go processReply(update)
+		//新用户通过用户名检查是否是清真
+		if upmsg.NewChatMembers != nil {
+			for _, auser := range *(upmsg.NewChatMembers) {
+				if checkQingzhen(auser.UserName) ||
+					checkQingzhen(auser.FirstName) ||
+					checkQingzhen(auser.LastName) {
+					banMember(gid, uid, -1)
+				}
+			}
+		}
+		//检查清真并剔除
+		if checkQingzhen(upmsg.Text) {
+			_, _ = bot.DeleteMessage(api.NewDeleteMessage(gid, upmsg.MessageID))
+			banMember(gid, uid, -1)
+		}
 	}
 }
 
@@ -123,6 +108,14 @@ func processReply(update *api.Update) {
 	} else if strings.HasPrefix(replyText, "kick") {
 		_, _ = bot.DeleteMessage(api.NewDeleteMessage(gid, upmsg.MessageID))
 		kickMember(gid, uid)
+	} else if strings.HasPrefix(replyText, "photo:") {
+		sendPhoto(gid, replyText[6:])
+	} else if strings.HasPrefix(replyText, "gif:") {
+		sendGif(gid, replyText[4:])
+	} else if strings.HasPrefix(replyText, "video:") {
+		sendVideo(gid, replyText[6:])
+	} else if strings.HasPrefix(replyText, "file:") {
+		sendFile(gid, replyText[5:])
 	} else if replyText != "" {
 		msg = api.NewMessage(gid, replyText)
 		msg.DisableWebPagePreview = true
@@ -186,6 +179,28 @@ func processCommond(update *api.Update) {
 		msg.ParseMode = "Markdown"
 		sendMessage(msg)
 		banMember(gid, uid, 30)
+	case "banme":
+		botme, _ := bot.GetChatMember(api.ChatConfigWithUser{ChatID: gid, UserID: bot.Self.ID})
+		if botme.CanRestrictMembers {
+			rand.Seed(time.Now().UnixNano())
+			sec := rand.Intn(540) + 60
+			banMember(gid, uid, int64(sec))
+			msg.Text = "恭喜[" + upmsg.From.String() + "](tg://user?id=" + strconv.Itoa(upmsg.From.ID) + ")获得" + strconv.Itoa(sec) + "秒的禁言礼包"
+			msg.ParseMode = "Markdown"
+		} else {
+			msg.Text = "请给我禁言权限,否则无法进行游戏"
+		}
+		sendMessage(msg)
+	case "me":
+		myuser := upmsg.From
+		msg.Text = "[" + upmsg.From.String() + "](tg://user?id=" + strconv.Itoa(upmsg.From.ID) + ") 的账号信息" +
+			"\r\nID: " + strconv.Itoa(uid) +
+			"\r\nUseName: [" + upmsg.From.String() + "](tg://user?id=" + strconv.Itoa(upmsg.From.ID) + ")" +
+			"\r\nLastName: " + myuser.LastName +
+			"\r\nFirstName: " + myuser.FirstName +
+			"\r\nIsBot: " + strconv.FormatBool(myuser.IsBot)
+		msg.ParseMode = "Markdown"
+		sendMessage(msg)
 	default:
 	}
 }
